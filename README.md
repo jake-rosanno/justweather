@@ -26,7 +26,7 @@ A clean, modern weather application built with React and Vite. JustWeather provi
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/YOUR_USERNAME/justweather.git
+git clone https://github.com/jake-rosanno/justweather.git
 cd justweather
 ```
 
