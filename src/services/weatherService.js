@@ -71,14 +71,45 @@ const setCachedData = (key, value) => {
   });
 };
 
-export const getRadarUrl = (timestamp) => {
+// Enhanced radar URL generation with MRMS support
+export const getRadarUrl = (timestamp, product = 'standard') => {
   const time = timestamp ? new Date(timestamp) : new Date();
   const formattedTime = time.toISOString()
     .replace(/[-:]/g, '')
     .split('.')[0]
     .slice(0, 12);
-  
-  return `https://tiles.radar.weather.gov/tiles/ridge/standard/${formattedTime}/CONUS-LARGE/{z}/{x}/{y}.png`;
+
+  const products = {
+    standard: `https://tiles.radar.weather.gov/tiles/ridge/standard/${formattedTime}/CONUS-LARGE/{z}/{x}/{y}.png`,
+    mrms_reflectivity: `https://tiles.radar.weather.gov/tiles/mrms/cref/${formattedTime}/CONUS-LARGE/{z}/{x}/{y}.png`,
+    mrms_rotation: `https://tiles.radar.weather.gov/tiles/mrms/rot/${formattedTime}/CONUS-LARGE/{z}/{x}/{y}.png`,
+    mrms_precip: `https://tiles.radar.weather.gov/tiles/mrms/qpe/${formattedTime}/CONUS-LARGE/{z}/{x}/{y}.png`,
+  };
+
+  return products[product] || products.standard;
+};
+
+// Get available radar timestamps (last 2 hours in 5-minute intervals)
+export const getRadarTimestamps = () => {
+  const timestamps = [];
+  const now = new Date();
+  const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000);
+
+  for (let time = twoHoursAgo; time <= now; time = new Date(time.getTime() + 5 * 60 * 1000)) {
+    timestamps.push(time.toISOString());
+  }
+
+  return timestamps;
+};
+
+// Get available radar products
+export const getRadarProducts = () => {
+  return [
+    { id: 'standard', name: 'Standard Reflectivity', description: 'Basic radar view showing precipitation intensity' },
+    { id: 'mrms_reflectivity', name: 'High-Res Composite', description: 'Detailed multi-radar precipitation view' },
+    { id: 'mrms_rotation', name: 'Storm Rotation', description: 'Shows areas of rotating storms' },
+    { id: 'mrms_precip', name: 'Precipitation', description: 'Estimated rainfall amounts' }
+  ];
 };
 
 export const searchLocations = async (query) => {
@@ -146,29 +177,33 @@ const validateForecastData = (data) => {
     throw new Error('No forecast periods available');
   }
 
+  // Process and validate each period
+  const validatedPeriods = periods.map(period => ({
+    number: period.number || 0,
+    name: period.name || '',
+    isDaytime: typeof period.isDaytime === 'boolean' ? period.isDaytime : true,
+    startTime: period.startTime || null,
+    endTime: period.endTime || null,
+    temperature: typeof period.temperature === 'number' ? period.temperature : null,
+    temperatureUnit: period.temperatureUnit || '°F',
+    windSpeed: period.windSpeed || 'N/A',
+    windDirection: period.windDirection || '',
+    icon: period.icon || null,
+    shortForecast: period.shortForecast || 'No forecast available',
+    detailedForecast: period.detailedForecast || '',
+    probabilityOfPrecipitation: {
+      value: period.probabilityOfPrecipitation?.value ?? 0
+    },
+    relativeHumidity: {
+      value: period.relativeHumidity?.value ?? null
+    }
+  }));
+
   return {
     ...data,
     properties: {
       ...data.properties,
-      periods: periods.map(period => ({
-        number: period.number || 0,
-        name: period.name || 'N/A',
-        startTime: period.startTime || null,
-        endTime: period.endTime || null,
-        temperature: period.temperature !== undefined ? period.temperature : null,
-        temperatureUnit: period.temperatureUnit || '°F',
-        windSpeed: period.windSpeed || 'N/A',
-        windDirection: period.windDirection || '',
-        icon: period.icon || null,
-        shortForecast: period.shortForecast || 'No forecast available',
-        detailedForecast: period.detailedForecast || '',
-        probabilityOfPrecipitation: {
-          value: period.probabilityOfPrecipitation?.value ?? 0
-        },
-        relativeHumidity: {
-          value: period.relativeHumidity?.value ?? null
-        }
-      }))
+      periods: validatedPeriods
     }
   };
 };
@@ -261,74 +296,49 @@ export const getWeatherByCoordinates = async (latitude, longitude) => {
       current: null
     };
 
-    if (forecastResponse.status === 'fulfilled') {
-      results.forecast = validateForecastData(forecastResponse.value.data).properties;
+    if (forecastResponse.status === 'fulfilled' && forecastResponse.value?.data) {
+      try {
+        results.forecast = validateForecastData(forecastResponse.value.data).properties;
+      } catch (error) {
+        console.error('Error validating forecast data:', error);
+      }
+    } else {
+      console.error('Forecast request failed:', forecastResponse.reason || 'Unknown error');
     }
 
-    if (hourlyResponse.status === 'fulfilled') {
-      results.hourly = validateHourlyData(hourlyResponse.value.data).properties;
+    if (hourlyResponse.status === 'fulfilled' && hourlyResponse.value?.data) {
+      try {
+        results.hourly = validateHourlyData(hourlyResponse.value.data).properties;
+      } catch (error) {
+        console.error('Error validating hourly data:', error);
+      }
     }
 
-    if (extendedResponse.status === 'fulfilled') {
+    if (extendedResponse.status === 'fulfilled' && extendedResponse.value?.data?.properties) {
       results.extended = extendedResponse.value.data.properties;
     }
 
+    // Only try to get current conditions if we have stations data
     if (stationsResponse.status === 'fulfilled' && 
-        stationsResponse.value.data.features?.length > 0) {
-      const nearestStation = stationsResponse.value.data.features[0];
+        stationsResponse.value?.data?.features?.length > 0) {
       try {
+        const nearestStation = stationsResponse.value.data.features[0];
         const observationsResponse = await noaaAxios.get(
           `${NOAA_BASE_URL}/stations/${nearestStation.properties.stationIdentifier}/observations/latest`
         );
-        results.current = observationsResponse.data.properties;
+        if (observationsResponse.data?.properties) {
+          results.current = observationsResponse.data.properties;
+        }
       } catch (error) {
         console.error('Error fetching current conditions:', error);
       }
     }
 
-    // Ensure we have minimum required data
-    if (!results.forecast && !results.hourly) {
-      throw new Error('Unable to fetch weather data. Please try again later.');
-    }
-
-    // Format the location data
-    const locationProps = pointResponse.data.properties.relativeLocation.properties;
-    const weatherData = {
-      ...results,
-      location: {
-        city: locationProps.city.replace(/\b\w/g, l => l.toUpperCase()),
-        state: locationProps.state,
-        distance: locationProps.distance.value,
-        bearing: locationProps.bearing.value
-      },
-      coordinates: { latitude: lat, longitude: lon }
-    };
-
     // Cache the results
-    setCachedData(cacheKey, weatherData);
-    return weatherData;
+    setCachedData(cacheKey, results);
+    return results;
   } catch (error) {
     console.error('Error fetching weather data:', error);
-    
-    // Handle specific API errors
-    if (error.response) {
-      switch (error.response.status) {
-        case 404:
-          throw new Error('Weather data is not available for this location');
-        case 429:
-          throw new Error('Too many requests. Please try again in a moment');
-        case 500:
-          throw new Error('Weather service is temporarily unavailable');
-        default:
-          throw new Error('Unable to fetch weather data. Please try again later');
-      }
-    }
-    
-    // Handle network or timeout errors
-    if (error.code === 'ECONNABORTED') {
-      throw new Error('Request timed out. Please check your connection and try again');
-    }
-    
     throw error;
   }
 };
